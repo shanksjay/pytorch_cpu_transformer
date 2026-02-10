@@ -1,0 +1,93 @@
+{
+  "_metadata": {
+    "title": "Reference Models",
+    "description": "Reference presets for LLaMA-style models. Use the per-model 'reduced' object for quick testing.",
+    "fields": {
+      "D": "hidden size",
+      "L": "number of Transformer layers",
+      "H": "number of query heads",
+      "Hkv": "number of key/value heads (GQA)",
+      "FF": "MLP intermediate (SwiGLU) size",
+      "V": "vocabulary size"
+    },
+    "field_long_forms": {
+      "D": "Dimension (hidden size)",
+      "L": "Number of Transformer layers",
+      "H": "Number of query heads",
+      "Hkv": "Number of key/value heads (GQA)",
+      "FF": "MLP intermediate (SwiGLU) size",
+      "V": "Vocabulary size"
+    },
+    "reduce_factor": 8,
+    "note": "JSON does not support comments; this metadata provides human-readable guidance and testing overrides. Use the 'reduced' subsection for fast local tests."
+  },
+
+  "llama-3.2-1b": {
+    "label": "Llama 3.2 1B",
+    "dim": 2048,
+    "n_layers": 16,
+    "n_heads": 32,
+    "n_kv_heads": 8,
+    "ffn_dim": 8192,
+    "vocab_sizes": [128, 256],
+    "max_seq_len": 4096,
+    "label_full": "D (Dimension)=2048, L (num_layers)=16, H (query heads)=32, Hkv (kv heads)=8, FF (ffn_dim)=8192, V (vocab_sizes)=[128,256]",
+    "reduced": {
+      "label": "Llama 3.2 1B (reduced for testing)",
+      "dim": 256,
+      "n_layers": 2,
+      "n_heads": 4,
+      "n_kv_heads": 2,
+      "ffn_dim": 1024,
+      "vocab_sizes": [128, 256],
+      "max_seq_len": 8096
+      ,"label_full": "D (Dimension)=256, L (num_layers)=2, H (query heads)=4, Hkv (kv heads)=2, FF (ffn_dim)=1024, V (vocab_sizes)=[128,256]"
+    }
+  },
+
+  "llama-3.1-8b": {
+    "label": "Llama 3.1 8B",
+    "dim": 4096,
+    "n_layers": 32,
+    "n_heads": 32,
+    "n_kv_heads": 8,
+    "ffn_dim": 14336,
+    "vocab_sizes": [128, 256],
+    "max_seq_len": 4096,
+    "label_full": "D (Dimension)=4096, L (num_layers)=32, H (query heads)=32, Hkv (kv heads)=8, FF (ffn_dim)=14336, V (vocab_sizes)=[128,256]",
+    "reduced": {
+      "label": "Llama 3.1 8B (reduced for testing)",
+      "dim": 512,
+      "n_layers": 4,
+      "n_heads": 4,
+      "n_kv_heads": 2,
+      "ffn_dim": 1792,
+      "vocab_sizes": [128, 256],
+      "max_seq_len": 8096
+      ,"label_full": "D (Dimension)=512, L (num_layers)=4, H (query heads)=4, Hkv (kv heads)=2, FF (ffn_dim)=1792, V (vocab_sizes)=[128,256]"
+    }
+  },
+
+  "llama-3.1-70b": {
+    "label": "Llama 3.1 70B",
+    "dim": 8192,
+    "n_layers": 80,
+    "n_heads": 64,
+    "n_kv_heads": 8,
+    "ffn_dim": 28672,
+    "vocab_sizes": [128, 256],
+    "max_seq_len": 4096,
+    "label_full": "D (Dimension)=8192, L (num_layers)=80, H (query heads)=64, Hkv (kv heads)=8, FF (ffn_dim)=28672, V (vocab_sizes)=[128,256]",
+    "reduced": {
+      "label": "Llama 3.1 70B (reduced for testing)",
+      "dim": 1024,
+      "n_layers": 10,
+      "n_heads": 8,
+      "n_kv_heads": 2,
+      "ffn_dim": 3584,
+      "vocab_sizes": [128, 256],
+      "max_seq_len": 8096
+      ,"label_full": "D (Dimension)=1024, L (num_layers)=10, H (query heads)=8, Hkv (kv heads)=2, FF (ffn_dim)=3584, V (vocab_sizes)=[128,256]"
+    }
+  }
+}

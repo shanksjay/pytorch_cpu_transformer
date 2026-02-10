@@ -2,6 +2,8 @@
 import math
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any
+import json
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -35,7 +37,87 @@ class LlamaConfig:
     # Attention kernel selection
     use_sdpa: bool = True          # use torch.scaled_dot_product_attention when available
     sdpa_force_math: bool = False  # set True to force math SDPA (useful for debugging)
+    debug: bool = False            # enable verbose debug prints (Q/K/V contents)
 
+    @classmethod
+    def from_pretrained(
+        cls,
+        name: str,
+        json_path: Optional[str] = None,
+        vocab_size: Optional[int] = None,
+        max_seq_len: Optional[int] = None,
+        use_reduced: bool = False,
+    ) -> "LlamaConfig":
+        """
+        Load a preset model config from a JSON file and return a LlamaConfig instance.
+
+        The JSON should contain entries with keys matching `name` and values:
+          {"dim":..., "n_layers":..., "n_heads":..., "n_kv_heads":..., "ffn_dim":..., "vocab_sizes":[..], "max_seq_len":...}
+
+        `ffn_dim` is converted to `ffn_dim_multiplier` relative to the LLaMA base hidden formula (8*dim/3).
+        If `vocab_size` is provided it overrides the preset's first vocab option.
+        """
+        if json_path is None:
+            json_path = Path(__file__).parent / "config" / "llama_configs.json"
+        else:
+            json_path = Path(json_path)
+
+        with open(json_path, "r") as f:
+            data = json.load(f)
+
+        if name not in data:
+            raise KeyError(f"Model config '{name}' not found in {json_path}")
+
+        entry = data[name]
+        # Optionally use the reduced testing subsection if requested and available
+        if use_reduced and isinstance(entry, dict) and "reduced" in entry:
+            # prefer reduced subsection for dimensions but keep top-level label if reduced has none
+            reduced_entry = entry["reduced"]
+            # capture labels
+            reduced_label = reduced_entry.get("label") or entry.get("label")
+            entry = reduced_entry
+            # attach a note we used the reduced preset
+            entry["_used_label"] = reduced_label
+        dim = int(entry["dim"])
+        n_layers = int(entry["n_layers"])
+        n_heads = int(entry["n_heads"])
+        n_kv_heads = int(entry.get("n_kv_heads", n_heads))
+        ffn_dim = int(entry["ffn_dim"])
+        vocab_options = entry.get("vocab_sizes", [32000])
+
+        chosen_vocab = vocab_size if vocab_size is not None else int(vocab_options[0])
+        ms = int(max_seq_len) if max_seq_len is not None else int(entry.get("max_seq_len", 4096))
+
+        # Convert absolute ffn_dim to multiplier relative to base hidden (8*dim/3)
+        base_hidden = int(8 * dim / 3)
+        ffn_multiplier = float(ffn_dim) / float(base_hidden)
+
+        cfg_obj = cls(
+            vocab_size=chosen_vocab,
+            max_seq_len=ms,
+            dim=dim,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+            ffn_dim_multiplier=ffn_multiplier,
+        )
+
+        # Attach optional human-readable label if present in JSON
+        label_val = entry.get("label") or entry.get("_used_label")
+        if label_val is not None:
+            try:
+                setattr(cfg_obj, "label", label_val)
+            except Exception:
+                pass
+        # Attach optional full-form label if present in JSON
+        label_full_val = entry.get("label_full")
+        if label_full_val is not None:
+            try:
+                setattr(cfg_obj, "label_full", label_full_val)
+            except Exception:
+                pass
+
+        return cfg_obj
 
 class RMSNorm(nn.Module):
     """RMSNorm as used by LLaMA (no mean subtraction)."""
@@ -139,6 +221,8 @@ class LlamaAttention(nn.Module):
             torch.ones((cfg.max_seq_len, cfg.max_seq_len), dtype=torch.bool).tril(),
             persistent=False,
         )
+        # Internal flag to ensure Q/K/V debug print happens only once
+        self._qkv_printed = False
 
     def forward(
         self,
@@ -166,10 +250,38 @@ class LlamaAttention(nn.Module):
         k = self.k_proj(x)  # [B, T, H_kv*Dh]
         v = self.v_proj(x)  # [B, T, H_kv*Dh]
 
+        # Print Q/K/V before reshape (debug mode only)
+        if not getattr(self, "_qkv_printed", False):
+            try:
+                if getattr(self.cfg, "debug", False):
+                    print("QKV BEFORE reshape shapes:", q.shape, k.shape, v.shape)
+                    # show small samples to illustrate tensor contents without overwhelming the log
+                    q_flat = q.reshape(-1)[:8].tolist()
+                    k_flat = k.reshape(-1)[:8].tolist()
+                    v_flat = v.reshape(-1)[:8].tolist()
+                    print("Q sample (first 8 values):", q_flat)
+                    print("K sample (first 8 values):", k_flat)
+                    print("V sample (first 8 values):", v_flat)
+            except Exception:
+                pass
+
         # Shape to heads
         q = rearrange(q, "b t (h dh) -> b h t dh", h=self.n_heads)
         k = rearrange(k, "b t (h dh) -> b h t dh", h=self.n_kv_heads)
         v = rearrange(v, "b t (h dh) -> b h t dh", h=self.n_kv_heads)
+
+        # Print Q/K/V after reshape (debug mode only)
+        if not getattr(self, "_qkv_printed", False):
+            try:
+                if getattr(self.cfg, "debug", False):
+                    print("QKV AFTER reshape shapes:", q.shape, k.shape, v.shape)
+                    print("Q[0,0,0,:8]:", q[0, 0, 0, :8].tolist())
+                    print("K[0,0,0,:8]:", k[0, 0, 0, :8].tolist())
+                    print("V[0,0,0,:8]:", v[0, 0, 0, :8].tolist())
+            except Exception:
+                pass
+            finally:
+                self._qkv_printed = True
 
         # RoPE
         q, k = self.rotary(q, k, start_pos=start_pos)
@@ -194,6 +306,10 @@ class LlamaAttention(nn.Module):
         tq = q.shape[2]
         tk = k.shape[2]
 
+        # Print matrix-multiply shapes once (debug mode only)
+        if not getattr(self, "_qkv_printed", False) and getattr(self.cfg, "debug", False):
+            print(f"MM Shapes: Q {q.shape}, K {k.shape}") 
+        
         # Build an "allowed" boolean mask (True means allowed attention).
         # - For full-seq (start_pos=0, tq==tk), slice the cached causal mask.
         # - For KV-cache decoding (start_pos>0), the correct band is tril(diagonal=start_pos).
@@ -402,6 +518,11 @@ if __name__ == "__main__":
     parser.add_argument("--seq-len", type=int, default=2048)
     parser.add_argument("--batch", type=int, default=1)
     parser.add_argument("--dim", type=int, default=512)
+    parser.add_argument("--preset", choices=["llama-3.2-1b", "llama-3.1-8b", "llama-3.1-70b"],
+                        default="llama-3.2-1b",
+                        help="Use a preset model configuration from config/llama_configs.json (default: llama-3.2-1b)")
+    parser.add_argument("--no-reduced", action="store_true",
+                        help="Do not use the preset's 'reduced' testing configuration (use full-size preset)")
     parser.add_argument("--layers", type=int, default=4)
     parser.add_argument("--heads", type=int, default=8)
     parser.add_argument("--kv-heads", type=int, default=None)
@@ -416,6 +537,7 @@ if __name__ == "__main__":
     parser.add_argument("--use-pad-mask", action="store_true",
                         help="Pass an all-True padding mask (useful to test mask overhead). Default: no attn_mask")
     parser.add_argument("--compile", action="store_true", help="Use torch.compile() (recommended for CPU, experimental for MPS)")
+    parser.add_argument("--debug", action="store_true", help="Enable debug prints of Q/K/V contents")
     args = parser.parse_args()
 
     # Device selection (Apple Silicon)
@@ -434,18 +556,67 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    cfg = LlamaConfig(
-        vocab_size=args.vocab,
-        max_seq_len=args.max_seq_len,
-        dim=args.dim,
-        n_layers=args.layers,
-        n_heads=args.heads,
-        n_kv_heads=args.kv_heads if args.kv_heads is not None else args.heads,
-        dropout=args.dropout,
-        rope_theta=args.rope_theta,
-        use_sdpa=not args.no_sdpa,
-        sdpa_force_math=args.sdpa_math,
-    )
+    if args.preset:
+        cfg = LlamaConfig.from_pretrained(
+            args.preset,
+            vocab_size=args.vocab,
+            max_seq_len=args.max_seq_len,
+            use_reduced=not args.no_reduced,
+        )
+        # apply runtime overrides
+        cfg.use_sdpa = not args.no_sdpa
+        cfg.sdpa_force_math = args.sdpa_math
+        cfg.dropout = args.dropout
+        cfg.rope_theta = args.rope_theta
+        # If kv-heads explicitly provided, override preset
+        if args.kv_heads is not None:
+            cfg.n_kv_heads = args.kv_heads
+    else:
+        cfg = LlamaConfig(
+            vocab_size=args.vocab,
+            max_seq_len=args.max_seq_len,
+            dim=args.dim,
+            n_layers=args.layers,
+            n_heads=args.heads,
+            n_kv_heads=args.kv_heads if args.kv_heads is not None else args.heads,
+            dropout=args.dropout,
+            rope_theta=args.rope_theta,
+            use_sdpa=not args.no_sdpa,
+            sdpa_force_math=args.sdpa_math,
+        )
+
+# apply debug flag from CLI (set after cfg is created)
+    cfg.debug = bool(args.debug)
+
+    # Print model summary
+    model_name = getattr(cfg, "label", args.preset if args.preset else "custom")
+    # compute FF size using the same logic as SwiGLU
+    base_hidden = int(8 * cfg.dim / 3)
+    if cfg.ffn_dim_multiplier is not None:
+        ffn_hidden = int(base_hidden * cfg.ffn_dim_multiplier)
+    else:
+        ffn_hidden = base_hidden
+    # round to multiple_of
+    ffn_hidden = cfg.multiple_of * ((ffn_hidden + cfg.multiple_of - 1) // cfg.multiple_of)
+
+    print("Models:")
+    print(f"Name: {model_name}")
+    # Prefer explicit full-form label if available
+    if hasattr(cfg, "label_full"):
+        print(cfg.label_full)
+    else:
+        # Full-form mapping
+        full_map = {
+            "D": "HiddenDim",
+            "L": "NumLayers",
+            "H": "QueryHeads",
+            "Hkv": "KVHeads",
+            "FF": "FFN",
+            "V": "VocabSize",
+        }
+        print(
+            f"Dimension: {full_map['D']}={cfg.dim}, {full_map['L']}={cfg.n_layers}, {full_map['H']}={cfg.n_heads}, {full_map['Hkv']}={cfg.n_kv_heads}, {full_map['FF']}={ffn_hidden}, {full_map['V']}={cfg.vocab_size}"
+        )
     model = LlamaModel(cfg).to(device)
 
     if args.compile:
@@ -481,7 +652,7 @@ if __name__ == "__main__":
             acts.append(ProfilerActivity.CUDA)
 
         with torch.no_grad():
-            with profile(activities=acts, record_shapes=True) as prof:
+            with profile(activities=acts, record_shapes=True, profile_memory=True, with_flops=True) as prof:
                 logits, _ = model(input_ids, attn_mask=attn_mask)
 
         print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=60))
