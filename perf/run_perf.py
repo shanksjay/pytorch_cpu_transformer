@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import List
 import sys
 import warnings
+import os
 
 # Suppress PyTorch profiler and memory allocation warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='torch.profiler.profiler')
@@ -31,6 +32,7 @@ from transformer_llama import LlamaConfig, LlamaModel
 
 
 SEQ_LENS = [64, 128, 256, 512, 1024, 2048, 4096]
+THREAD_COUNTS = [1, 2, 4, 8]
 PRESETS = [
     ("llama-3.2-1b", "1B"),
     ("llama-3.1-8b", "8B"),
@@ -41,7 +43,12 @@ def safe_getattr(obj, name, default=0):
     return getattr(obj, name, default)
 
 
-def run_profile_once(preset_name: str, seq_len: int, batch: int, device: torch.device, use_reduced: bool):
+def run_profile_once(preset_name: str, seq_len: int, batch: int, device: torch.device, use_reduced: bool, num_threads: int = None):
+    # Set OMP_NUM_THREADS for CPU parallelism
+    if num_threads is not None and device.type == "cpu":
+        os.environ["OMP_NUM_THREADS"] = str(num_threads)
+        torch.set_num_threads(num_threads)
+    
     cfg = LlamaConfig.from_pretrained(preset_name, use_reduced=use_reduced)
     cfg.use_sdpa = False  # keep CPU deterministic profiling
 
@@ -106,6 +113,7 @@ def run_profile_once(preset_name: str, seq_len: int, batch: int, device: torch.d
         "model_size": next((tag for (n, tag) in PRESETS if n == preset_name), "unknown"),
         "seq_len": seq_len,
         "batch": batch,
+        "num_threads": num_threads if num_threads is not None else 1,
         "mflops": float(mflops),
         "total_cpu_time_s": float(cpu_time_s),
         "total_mem_mb": float(mem_mb),
@@ -114,11 +122,11 @@ def run_profile_once(preset_name: str, seq_len: int, batch: int, device: torch.d
     return result
 
 
-def run_profile_avg(preset_name: str, seq_len: int, batch: int, device: torch.device, use_reduced: bool, iters: int = 3):
+def run_profile_avg(preset_name: str, seq_len: int, batch: int, device: torch.device, use_reduced: bool, iters: int = 3, num_threads: int = None):
     runs = []
     for i in range(iters):
         print(f"  Iter {i+1}/{iters}")
-        r = run_profile_once(preset_name, seq_len, batch, device, use_reduced)
+        r = run_profile_once(preset_name, seq_len, batch, device, use_reduced, num_threads=num_threads)
         runs.append(r)
 
     # average scalars
@@ -156,6 +164,7 @@ def run_profile_avg(preset_name: str, seq_len: int, batch: int, device: torch.de
         "model_size": runs[0].get("model_size"),
         "seq_len": seq_len,
         "batch": batch,
+        "num_threads": num_threads if num_threads is not None else 1,
         "mflops": float(avg_mflops),
         "total_cpu_time_s": float(avg_cpu),
         "total_mem_mb": float(avg_mem),
@@ -178,6 +187,8 @@ def main(argv: List[str] = None):
     parser.add_argument("--presets", type=str, nargs="*", default=[p[0] for p in PRESETS])
     parser.add_argument("--max-seq-len-override", type=int, default=None,
                         help="Override model max_seq_len (useful for benchmarking longer sequences)")
+    parser.add_argument("--thread-counts", type=int, nargs="*", default=None,
+                        help="Number of CPU threads to benchmark (default: 1 thread only, use --thread-counts 1 2 4 8 for scaling analysis)")
     args = parser.parse_args(argv)
 
     # device selection
@@ -193,6 +204,9 @@ def main(argv: List[str] = None):
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Default to single-thread if not specified
+    thread_counts = args.thread_counts if args.thread_counts is not None else [1]
+
     results = []
     for preset in args.presets:
         for seq in args.seq_lens:
@@ -205,27 +219,28 @@ def main(argv: List[str] = None):
                 print(f"Skipping preset={preset} seq_len={seq} (exceeds max_seq_len={cfg.max_seq_len})")
                 continue
             
-            print(f"Running preset={preset} seq_len={seq} batch={args.batch} device={device}")
-            try:
-                r = run_profile_avg(preset, seq, args.batch, device, use_reduced=not args.full, iters=args.iters)
-                results.append(r)
-                # save intermediate results to be safe
-                with open(out_dir / "perf_results.json", "w") as f:
-                    json.dump(results, f, indent=2)
-            except Exception as e:
-                print(f"Run failed for {preset} seq={seq}: {e}")
+            for num_threads in thread_counts:
+                print(f"Running preset={preset} seq_len={seq} threads={num_threads} batch={args.batch} device={device}")
+                try:
+                    r = run_profile_avg(preset, seq, args.batch, device, use_reduced=not args.full, iters=args.iters, num_threads=num_threads)
+                    results.append(r)
+                    # save intermediate results to be safe
+                    with open(out_dir / "perf_results.json", "w") as f:
+                        json.dump(results, f, indent=2)
+                except Exception as e:
+                    print(f"Run failed for {preset} seq={seq} threads={num_threads}: {e}")
 
     # write CSV summary (one row per run, flatten top ops into columns)
     csv_path = out_dir / "perf_summary.csv"
     with open(csv_path, "w", newline="") as cf:
-        fieldnames = ["preset", "model_label", "model_size", "seq_len", "batch", "mflops", "total_cpu_time_s", "total_mem_mb"]
+        fieldnames = ["preset", "model_label", "model_size", "seq_len", "batch", "num_threads", "mflops", "total_cpu_time_s", "total_mem_mb"]
         # add top ops columns
         for i in range(1, 6):
             fieldnames += [f"top{i}_op", f"top{i}_cpu_s", f"top{i}_cpu_pct", f"top{i}_flops", f"top{i}_mem_mb"]
         writer = csv.DictWriter(cf, fieldnames=fieldnames)
         writer.writeheader()
         for r in results:
-            row = {k: r.get(k) for k in ["preset", "model_label", "model_size", "seq_len", "batch", "mflops", "total_cpu_time_s", "total_mem_mb"]}
+            row = {k: r.get(k) for k in ["preset", "model_label", "model_size", "seq_len", "batch", "num_threads", "mflops", "total_cpu_time_s", "total_mem_mb"]}
             for i in range(5):
                 top = r["top_ops"][i] if i < len(r["top_ops"]) else {"op": "", "cpu_time_s": 0.0, "cpu_pct": 0.0, "flops": 0, "mem_mb": 0.0}
                 row[f"top{i+1}_op"] = top["op"]

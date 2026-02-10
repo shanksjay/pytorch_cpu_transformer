@@ -153,6 +153,37 @@ python perf/run_perf.py --device cpu --iters 3 \
   --seq-lens 512 1024 2048
 ```
 
+#### CPU Thread Scaling Analysis
+
+To understand how parallelization impacts performance, profile across multiple thread counts:
+
+```bash
+python perf/run_perf.py --device cpu --batch 1 --iters 5 \
+  --thread-counts 1 2 4 8 \
+  --seq-lens 512 1024 2048
+```
+
+This will:
+- Run each configuration with **1, 2, 4, and 8 CPU threads** (controlled via `OMP_NUM_THREADS`)
+- Measure **latency improvement** (speedup) and **parallelization efficiency**
+- Show which models/sequence lengths benefit most from multi-threading
+- Generate speedup plots: `thread_scaling_speedup.png` and `thread_scaling_latency.png`
+
+**Interpreting Thread Scaling Results:**
+- **Speedup = 1-thread latency / N-thread latency**
+  - Linear speedup (e.g., 8x speedup with 8 threads) = ideal parallelization
+  - Sub-linear speedup = memory bandwidth or cache limitation
+  - Super-linear speedup (rare) = cache effects or NUMA locality
+  
+- **Efficiency = Speedup / Thread Count**
+  - Efficiency = 1.0 → perfect parallelization
+  - Efficiency < 1.0 → overhead or bottleneck from shared resources
+
+**Default Behavior:**
+- If `--thread-counts` is not specified, only single-thread baseline (1 thread) is run
+- Thread count is stored in the CSV under `num_threads` column
+- Visualization tools (`visualize_perf.py`) automatically generate thread scaling plots if multi-thread data exists
+
 ### Understanding the Output
 
 Each row in `perf_summary.csv` contains:
@@ -163,6 +194,7 @@ Each row in `perf_summary.csv` contains:
 | `model_size` | Human-readable label (1B, 8B, 70B) |
 | `seq_len` | Sequence length tested |
 | `batch` | Batch size |
+| `num_threads` | Number of CPU threads used (OpenMP parallelization) |
 | `mflops` | Million FLOPs achieved (total FLOPs / 1M) |
 | `total_cpu_time_s` | Total CPU time (averaged over `--iters` runs) in seconds |
 | `total_mem_mb` | Peak memory allocated (in MB) |

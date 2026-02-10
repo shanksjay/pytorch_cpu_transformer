@@ -21,6 +21,7 @@ def load_csv(csv_path: Path) -> List[Dict]:
         reader = csv.DictReader(f)
         for row in reader:
             row['seq_len'] = int(row['seq_len'])
+            row['num_threads'] = int(row.get('num_threads', 1))
             row['mflops'] = float(row['mflops'])
             row['total_cpu_time_s'] = float(row['total_cpu_time_s'])
             row['total_mem_mb'] = float(row['total_mem_mb'])
@@ -28,7 +29,7 @@ def load_csv(csv_path: Path) -> List[Dict]:
     
     # Custom sort order: 1B, 8B, 70B
     model_order = {'1B': 0, '8B': 1, '70B': 2}
-    return sorted(results, key=lambda x: (model_order.get(x['model_size'], 99), x['seq_len']))
+    return sorted(results, key=lambda x: (model_order.get(x['model_size'], 99), x['seq_len'], x['num_threads']))
 
 
 def generate_text_table(results: List[Dict], out_path: Path):
@@ -185,6 +186,66 @@ def generate_markdown_table(results: List[Dict], out_path: Path):
         f.write(markdown)
 
 
+def generate_thread_scaling_table(results: List[Dict], out_path: Path):
+    """Generate thread scaling analysis table."""
+    
+    # Check if we have multi-threaded data
+    thread_counts = sorted(set(r['num_threads'] for r in results))
+    if len(thread_counts) < 2:
+        return  # Skip if no thread scaling data
+    
+    # Group by model, seq_len
+    data_by_model_seq = {}
+    for row in results:
+        key = (row['model_size'], row['seq_len'])
+        if key not in data_by_model_seq:
+            data_by_model_seq[key] = []
+        data_by_model_seq[key].append(row)
+    
+    output = []
+    output.append("="*100)
+    output.append("CPU THREAD SCALING ANALYSIS - SPEEDUP AND EFFICIENCY")
+    output.append("="*100)
+    output.append("\nNote: Speedup measured relative to 1-thread baseline")
+    output.append("       Efficiency = Speedup / Num_Threads (ideal = 1.0)\n")
+    
+    # Custom model order
+    model_order = ['1B', '8B', '70B']
+    
+    for model in model_order:
+        model_configs = {k: v for k, v in data_by_model_seq.items() if k[0] == model}
+        if not model_configs:
+            continue
+        
+        output.append(f"\n{model} Model - Thread Scaling Analysis:")
+        output.append("-"*100)
+        output.append(f"{'Seq Len':<12} {'Threads':<10} {'Latency (s)':<15} {'Speedup':<12} {'Efficiency':<12} {'MFLOPs':<15}")
+        output.append("-"*100)
+        
+        for (mdl, seq_len), thread_data in sorted(model_configs.items()):
+            thread_data.sort(key=lambda x: x['num_threads'])
+            
+            # Get baseline (1 thread)
+            baseline = next((r for r in thread_data if r['num_threads'] == 1), None)
+            if not baseline:
+                continue
+            
+            for row in thread_data:
+                speedup = baseline['total_cpu_time_s'] / row['total_cpu_time_s']
+                efficiency = speedup / row['num_threads']
+                output.append(
+                    f"{seq_len:<12} {row['num_threads']:<10} {row['total_cpu_time_s']:<15.6f} "
+                    f"{speedup:<12.2f}x {efficiency:<12.2f} {row['mflops']:<15.0f}"
+                )
+            
+            output.append("")  # Blank line between seq_lens
+    
+    output.append("="*100)
+    
+    with open(out_path, 'w') as f:
+        f.write('\n'.join(output))
+
+
 def main():
     csv_path = Path(__file__).parent / "perf_summary.csv"
     
@@ -203,6 +264,7 @@ def main():
     text_path = Path(__file__).parent / "comparison_table.txt"
     csv_path_out = Path(__file__).parent / "comparison_table.csv"
     md_path = Path(__file__).parent / "comparison_table.md"
+    thread_scaling_path = Path(__file__).parent / "thread_scaling_analysis.txt"
     
     print("Generating comparison tables...\n")
     
@@ -217,6 +279,11 @@ def main():
     # Markdown table
     generate_markdown_table(results, md_path)
     print(f"✓ Saved markdown table: {md_path}")
+    
+    # Thread scaling table (if available)
+    generate_thread_scaling_table(results, thread_scaling_path)
+    if thread_scaling_path.exists() and thread_scaling_path.stat().st_size > 0:
+        print(f"✓ Saved thread scaling analysis: {thread_scaling_path}")
 
 
 if __name__ == "__main__":
