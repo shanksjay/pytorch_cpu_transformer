@@ -1,6 +1,9 @@
 # Perf benchmark generated files
 perf/*.json
 perf/*.csv
+perf/*.txt
+perf/plots/
+perf/comparison_table.md
 
 # Python
 __pycache__/

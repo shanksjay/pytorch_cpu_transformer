@@ -15,6 +15,11 @@ import csv
 from pathlib import Path
 from typing import List
 import sys
+import warnings
+
+# Suppress PyTorch profiler and memory allocation warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='torch.profiler.profiler')
+warnings.filterwarnings('ignore', message='.*Memory block of unknown size.*')
 
 # Ensure the repository root is on sys.path so imports like `transformer_llama` resolve
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -57,7 +62,7 @@ def run_profile_once(preset_name: str, seq_len: int, batch: int, device: torch.d
     if torch.cuda.is_available():
         activities.append(ProfilerActivity.CUDA)
 
-    with profile(activities=activities, record_shapes=True, profile_memory=True, with_flops=True) as prof:
+    with profile(activities=activities, record_shapes=True, profile_memory=True, with_flops=True, acc_events=True) as prof:
         with torch.no_grad():
             logits, _ = model(input_ids, attn_mask=attn_mask)
 
